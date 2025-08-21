@@ -229,9 +229,9 @@ ColumnFamilyOptions SanitizeCfOptions(const ImmutableDBOptions& db_options,
                                       bool read_only,
                                       const ColumnFamilyOptions& src) {
   ColumnFamilyOptions result = src;
-  size_t clamp_max = std::conditional<
-      sizeof(size_t) == 4, std::integral_constant<size_t, 0xffffffff>,
-      std::integral_constant<uint64_t, 64ull << 30>>::type::value;
+  size_t clamp_max = std::conditional < sizeof(size_t) == 4,
+         std::integral_constant<size_t, 0xffffffff>,
+         std::integral_constant < uint64_t, 64ull << 30 >> ::type::value;
   ClipToRange(&result.write_buffer_size, (static_cast<size_t>(64)) << 10,
               clamp_max);
   // if user sets arena_block_size, we trust user to use this value. Otherwise,
@@ -1357,50 +1357,17 @@ SuperVersion* ColumnFamilyData::GetReferencedSuperVersion(DBImpl* db) {
 }
 
 SuperVersion* ColumnFamilyData::GetThreadLocalSuperVersion(DBImpl* db) {
-  // The SuperVersion is cached in thread local storage to avoid acquiring
-  // mutex when SuperVersion does not change since the last use. When a new
-  // SuperVersion is installed, the compaction or flush thread cleans up
-  // cached SuperVersion in all existing thread local storage. To avoid
-  // acquiring mutex for this operation, we use atomic Swap() on the thread
-  // local pointer to guarantee exclusive access. If the thread local pointer
-  // is being used while a new SuperVersion is installed, the cached
-  // SuperVersion can become stale. In that case, the background thread would
-  // have swapped in kSVObsolete. We re-check the value at when returning
-  // SuperVersion back to thread local, with an atomic compare and swap.
-  // The superversion will need to be released if detected to be stale.
-  void* ptr = local_sv_->Swap(SuperVersion::kSVInUse);
-  // Invariant:
-  // (1) Scrape (always) installs kSVObsolete in ThreadLocal storage
-  // (2) the Swap above (always) installs kSVInUse, ThreadLocal storage
-  // should only keep kSVInUse before ReturnThreadLocalSuperVersion call
-  // (if no Scrape happens).
-  assert(ptr != SuperVersion::kSVInUse);
-  SuperVersion* sv = static_cast<SuperVersion*>(ptr);
-  if (sv == SuperVersion::kSVObsolete) {
-    RecordTick(ioptions_.stats, NUMBER_SUPERVERSION_ACQUIRES);
-    db->mutex()->Lock();
-    sv = super_version_->Ref();
-    db->mutex()->Unlock();
-  }
-  assert(sv != nullptr);
+  // Always get fresh SuperVersion, bypassing TLS
+  db->mutex()->Lock();
+  SuperVersion* sv = super_version_->Ref();
+  db->mutex()->Unlock();
   return sv;
 }
 
 bool ColumnFamilyData::ReturnThreadLocalSuperVersion(SuperVersion* sv) {
   assert(sv != nullptr);
-  // Put the SuperVersion back
-  void* expected = SuperVersion::kSVInUse;
-  if (local_sv_->CompareAndSwap(static_cast<void*>(sv), expected)) {
-    // When we see kSVInUse in the ThreadLocal, we are sure ThreadLocal
-    // storage has not been altered and no Scrape has happened. The
-    // SuperVersion is still current.
-    return true;
-  } else {
-    // ThreadLocal scrape happened in the process of this GetImpl call (after
-    // thread local Swap() at the beginning and before CompareAndSwap()).
-    // This means the SuperVersion it holds is obsolete.
-    assert(expected == SuperVersion::kSVObsolete);
-  }
+  // Since we're bypassing TLS in GetThreadLocalSuperVersion,
+  // always return false to indicate TLS is not being used
   return false;
 }
 
